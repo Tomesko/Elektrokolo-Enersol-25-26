@@ -1,224 +1,109 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import math
-import matplotlib.pyplot as plt
 
-# --- 1. PHYSICS CONSTANTS & CONFIGURATION ---
-CONSTANTS = {
-    'g': 9.81,                # Gravity (m/s^2)
-    'CdA': 0.45,              # Aerodynamic drag coefficient (m^2)
-    'Crr': 0.008,             # Rolling resistance coefficient
-    'rho_air': 1.225,         # Air density (kg/m^3)
-    'motor_efficiency': 0.85, # 85% efficiency
-    'solar_real_eff': 0.70    # 70% real-world charging efficiency
+# --- KONSTANTY ---
+# Pro solární výpočet stále potřebujeme účinnost panelu
+EFF_PANEL = 0.70
+
+st.set_page_config(page_title="Solar Bike Thesis", layout="wide")
+
+# --- DATA LOKALIT (Pro solární zisk) ---
+LOKALITA_DATA = {
+    "Hostouň (Rovina)":      {"osvit": 3.8},
+    "Praha (Mírné kopce)":   {"osvit": 3.5},
+    "Brno (Zvlněné)":        {"osvit": 3.6},
+    "Šumava (Hory)":         {"osvit": 3.0},
+    "Itálie (Jih)":          {"osvit": 5.0},
+    "Vlastní nastavení":     {"osvit": 0.0}
 }
 
-# --- 2. LOCATION DATABASE ---
-# Slope is average % incline over the route. 
-# Sunlight Coeff is a multiplier for nominal panel power (0.0 - 1.0+ based on weather/latitude)
-LOCATIONS = {
-    "Hostouň": {"slope": 1.0, "sunlight": 0.65},  # Mild terrain, moderate sun
-    "Prague":  {"slope": 2.5, "sunlight": 0.60},  # Hilly city, moderate sun
-    "Brno":    {"slope": 1.5, "sunlight": 0.68},  # Moderate terrain
-    "Šumava":  {"slope": 4.5, "sunlight": 0.70},  # Mountains, higher altitude sun
-    "Italy (Coast)": {"slope": 1.0, "sunlight": 0.95}, # Flat, strong sun
-}
+# --- SIDEBAR: VSTUPNÍ PARAMETRY ---
+st.sidebar.header("⚙️ 1) Parametry jízdy")
+# Tvůj kód vyžaduje hmotnost na vstupu, tak ji zde nechávám
+celkova_hmotnost = st.sidebar.number_input("Celková hmotnost (kg)", value=100)
+prumerna_rychlost = st.sidebar.number_input("Průměrná rychlost (km/h)", value=25)
 
-# --- 3. HELPER FUNCTIONS ---
-def calculate_physics(weight, speed_kmh, slope_percent, assist_level, motor_nominal_w):
-    """
-    Calculates the power required and consumption metrics based on physics forces.
-    """
-    # Unit Conversions
-    v = speed_kmh / 3.6  # km/h to m/s
-    theta = math.atan(slope_percent / 100) # Percent to radians
-    
-    # Force Calculations (Newtons)
-    # 1. Air Resistance: 0.5 * rho * CdA * v^2
-    f_air = 0.5 * CONSTANTS['rho_air'] * CONSTANTS['CdA'] * (v**2)
-    
-    # 2. Rolling Resistance: m * g * Crr * cos(theta)
-    f_roll = weight * CONSTANTS['g'] * CONSTANTS['Crr'] * math.cos(theta)
-    
-    # 3. Gravity: m * g * sin(theta)
-    f_gravity = weight * CONSTANTS['g'] * math.sin(theta)
-    
-    # Total Resistive Force
-    total_force = f_air + f_roll + f_gravity
-    
-    # Power Required at the wheels (Mechanical Power)
-    # If going downhill significantly, power might be negative (regen), but simple motors free-wheel.
-    # We will clamp min power to 0 for consumption (ignoring regen braking for this model unless specified)
-    p_mech_req = max(0, total_force * v)
-    
-    # Motor Contribution
-    # Assist Level 1-5 maps to 20% - 100% of the REQUIRED power provided by motor
-    # (Remaining power is provided by the human legs)
-    assist_ratio = assist_level * 0.2
-    motor_mech_power = p_mech_req * assist_ratio
-    
-    # Cap motor power at nominal limit (Mechanical limit)
-    # We assume nominal power is the max electrical input or output? 
-    # Usually nominal is output. Let's cap the mechanical output.
-    if motor_mech_power > motor_nominal_w:
-        motor_mech_power = motor_nominal_w
-        
-    # Electrical Power Consumption (Accounting for efficiency)
-    # P_elec = P_mech / Efficiency
-    p_elec = motor_mech_power / CONSTANTS['motor_efficiency']
-    
-    return {
-        "forces": {"Air": f_air, "Rolling": f_roll, "Gravity": f_gravity},
-        "power_mech": motor_mech_power,
-        "power_elec": p_elec,
-        "speed_ms": v
-    }
+st.sidebar.header("🔋 2) Baterie a Motor")
+kapacita_baterie = st.sidebar.number_input("Kapacita baterie [Wh]", value=540)
+vykon_motoru = st.sidebar.number_input("Výkon motoru [W]", value=250)
 
-# --- 4. APP LAYOUT & LOGIC ---
+# Výběr úrovně asistence (1-5) a převod na procenta pro tvůj vzorec
+st.sidebar.write("Úroveň asistence")
+level = st.sidebar.select_slider("Vyberte stupeň", options=[1, 2, 3, 4, 5], value=3)
 
-st.set_page_config(page_title="Solar E-Bike Simulator", page_icon="🚲", layout="wide")
+# Převod na desetinné číslo (např. Level 5 = 1.0 = 100%)
+# Pokud chceš, aby Level 1 byl třeba 0.2 (20%), necháme to takto:
+procento_asistence = level * 0.2 
+st.sidebar.caption(f"Procento asistence ve vzorci: {procento_asistence:.1f} ({procento_asistence*100:.0f}%)")
 
-st.title("🚲 E-Bike Range & Solar Simulator")
-st.markdown("Physics-based simulation for thesis research.")
+st.sidebar.header("☀️ 3) Solár a Lokalita")
+vykon_panelu_wp = st.sidebar.number_input("Nominální výkon solar. panelu [Wp]", value=100)
 
-# --- SIDEBAR INPUTS ---
-st.sidebar.header("1. Ride Parameters")
-total_weight = st.sidebar.number_input("Total Weight (Rider + Bike) [kg]", value=100, step=5)
-avg_speed = st.sidebar.slider("Average Speed [km/h]", 10, 45, 25)
+# VÝBĚR LOKALITY
+lokalita = st.sidebar.selectbox("Vyberte lokalitu", list(LOKALITA_DATA.keys()))
 
-st.sidebar.header("2. Battery & Motor")
-battery_voltage = st.sidebar.number_input("System Voltage [V]", value=36, step=12)
-battery_wh = st.sidebar.number_input("Battery Capacity [Wh]", value=500, step=50)
-motor_nominal = st.sidebar.number_input("Nominal Motor Power [W]", value=250, step=250)
-
-st.sidebar.header("3. Assist Control")
-# Mapping levels 1-5 to meaningful labels
-assist_lvl = st.sidebar.select_slider(
-    "Assist Level", 
-    options=[1, 2, 3, 4, 5],
-    value=3,
-    help="1 = 20% Motor Support, 5 = 100% Motor Support"
-)
-
-st.sidebar.header("4. Solar & Location")
-panel_power_wp = st.sidebar.number_input("Solar Panel Peak Power [Wp]", value=50, step=10)
-location_name = st.sidebar.selectbox("Select Location", list(LOCATIONS.keys()) + ["Custom Settings"])
-
-# Logic for Custom vs Preset Location
-if location_name == "Custom Settings":
-    slope_input = st.sidebar.slider("Terrain Slope [%]", -5.0, 15.0, 1.0)
-    sunlight_coeff = st.sidebar.slider("Sunlight Coefficient", 0.1, 1.5, 0.8)
+# Výpočet solární energie
+if lokalita == "Vlastní nastavení":
+    dodana_energie_wh = st.sidebar.number_input("Dodaná energie z osvitu [Wh]", value=150)
 else:
-    loc_data = LOCATIONS[location_name]
-    slope_input = loc_data["slope"]
-    sunlight_coeff = loc_data["sunlight"]
-    st.sidebar.info(f"📍 {location_name}: Slope {slope_input}%, Sun Coeff {sunlight_coeff}")
+    data = LOKALITA_DATA[lokalita]
+    osvit_regionu = data["osvit"]
+    dodana_energie_wh = vykon_panelu_wp * osvit_regionu * EFF_PANEL
+    st.sidebar.success(f"☀️ Solární zisk: **{dodana_energie_wh:.0f} Wh**")
 
-# --- CALCULATION CORE ---
+# ==============================================================================
+# --- VÝPOČET DLE TVÉHO KÓDU ---
+# ==============================================================================
 
-# 1. Physics Calcs
-phys_data = calculate_physics(total_weight, avg_speed, slope_input, assist_lvl, motor_nominal)
+# Tvůj vzorec: celkovy_vykon_motoru = vykon_motoru * procento_asistence
+celkovy_vykon_motoru = vykon_motoru * procento_asistence
 
-# 2. Consumption (Wh/km)
-# Time to travel 1 km (in hours) = 1 / speed_kmh
-time_per_km_h = 1 / avg_speed
-energy_per_km_wh = phys_data['power_elec'] * time_per_km_h
-
-# 3. Solar Contribution
-# Solar Power Supplied = Panel * Sun * Efficiency
-solar_power_supplied = panel_power_wp * sunlight_coeff * CONSTANTS['solar_real_eff']
-solar_energy_per_km = solar_power_supplied * time_per_km_h
-
-# 4. Net Consumption & Ranges
-net_consumption_wh_km = energy_per_km_wh - solar_energy_per_km
-
-# Range Calculation (Battery Only)
-if energy_per_km_wh > 0:
-    range_battery = battery_wh / energy_per_km_wh
+# Prevence dělení nulou
+if celkovy_vykon_motoru > 0:
+    # Tvůj vzorec: dojezd = (kapacita_baterie / celkovy_vykon_motoru) * prumerna_rychlost
+    
+    # 1. Dojezd jen na baterii
+    dojezd_bat = (kapacita_baterie / celkovy_vykon_motoru) * prumerna_rychlost
+    
+    # 2. Dojezd se solárem (přičteme energii ze slunce k baterii)
+    # Logika: (Baterie + Solár) / Výkon * Rychlost
+    dojezd_solar = ((kapacita_baterie + dodana_energie_wh) / celkovy_vykon_motoru) * prumerna_rychlost
 else:
-    range_battery = 999 # Infinite if no power needed (downhill)
+    dojezd_bat = 0
+    dojezd_solar = 0
 
-# Range Calculation (With Solar)
-# If solar > consumption, theoretically infinite range (until night)
-if net_consumption_wh_km <= 0 and energy_per_km_wh > 0:
-    range_solar = 999 
-elif energy_per_km_wh <= 0:
-    range_solar = 999
-else:
-    range_solar = battery_wh / net_consumption_wh_km
+bonus_km = dojezd_solar - dojezd_bat
 
-# Cap infinite ranges for display nicely
-range_battery = min(range_battery, 999)
-range_solar = min(range_solar, 999)
-extra_km = range_solar - range_battery
+# ==============================================================================
+# --- DASHBOARD ---
+# ==============================================================================
 
-# --- DASHBOARD DISPLAY ---
+st.title("🔋 Solar Bike Thesis: Kalkulátor")
+st.markdown("**Metoda výpočtu:** Konstantní odběr (Zjednodušený model)")
 
-# Row 1: Key Metrics
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Energy Consumption", f"{energy_per_km_wh:.1f} Wh/km", delta=f"-{solar_energy_per_km:.2f} Wh/km Solar")
-with col2:
-    st.metric("Range (Battery Only)", f"{range_battery:.1f} km")
-with col3:
-    if range_solar >= 999:
-        st.metric("Range (Solar Enhanced)", "∞ km", "Self-sustaining!")
-    else:
-        st.metric("Range (Solar Enhanced)", f"{range_solar:.1f} km", f"+{extra_km:.1f} km")
+# Metriky
+m1, m2, m3 = st.columns(3)
+m1.metric("Odebíraný výkon", f"{celkovy_vykon_motoru:.0f} W")
+m2.metric("Dojezd (Jen Baterie)", f"{dojezd_bat:.1f} km")
+m3.metric("Dojezd (+ Solár)", f"{dojezd_solar:.1f} km", delta=f"+{bonus_km:.1f} km")
 
 st.divider()
 
-# Row 2: Charts & Details
-c1, c2 = st.columns([2, 1])
+col_graph, col_data = st.columns([2, 1])
 
-with c1:
-    st.subheader("Range Comparison")
-    
-    # Prepare Data for Chart
+with col_graph:
+    st.subheader("Porovnání dojezdu")
     chart_data = pd.DataFrame({
-        'Scenario': ['Battery Only', 'Battery + Solar'],
-        'Range (km)': [range_battery, range_solar if range_solar < 999 else range_battery * 1.5] # Cap visual for infinite
+        'Zdroj': ['Jen Baterie', 'Baterie + Solár'],
+        'Dojezd (km)': [dojezd_bat, dojezd_solar]
     })
-    
-    # Custom matplotlib chart for better control
-    fig, ax = plt.subplots(figsize=(6, 3))
-    colors = ['#FF4B4B', '#4CAF50']
-    bars = ax.barh(chart_data['Scenario'], chart_data['Range (km)'], color=colors)
-    ax.set_xlabel("Distance (km)")
-    ax.grid(axis='x', linestyle='--', alpha=0.7)
-    
-    # Add labels
-    for bar in bars:
-        width = bar.get_width()
-        label = f"{width:.1f} km" if width < 900 else "Infinite/Daily Max"
-        ax.text(width + 1, bar.get_y() + bar.get_height()/2, label, va='center')
-        
-    st.pyplot(fig)
+    st.bar_chart(chart_data.set_index('Zdroj'))
 
-with c2:
-    st.subheader("Physics Breakdown")
-    st.markdown("Perceived Resistive Forces (Newtons):")
-    forces = phys_data['forces']
-    
-    # Simple dataframe for display
-    df_forces = pd.DataFrame.from_dict(forces, orient='index', columns=['Force (N)'])
-    st.dataframe(df_forces.style.format("{:.2f}"))
-    
-    st.markdown("---")
-    st.markdown(f"**Solar Yield:** {solar_power_supplied:.1f} Watts (continuous)")
-    if solar_power_supplied > phys_data['power_elec']:
-        st.success("Solar generation exceeds consumption!")
-    else:
-        st.warning(f"Solar covers {min(100, (solar_power_supplied/phys_data['power_elec'])*100):.1f}% of needs")
-
-# --- DEBUG / EDUCATIONAL EXPANDER ---
-with st.expander("Show Calculation Logic (For Thesis Documentation)"):
-    st.latex(r"P_{resist} = (F_{air} + F_{roll} + F_{slope}) \cdot v")
-    st.latex(r"F_{air} = 0.5 \cdot \rho \cdot C_d A \cdot v^2 = " + f"{forces['Air']:.2f} N")
-    st.latex(r"F_{roll} = mg C_{rr} \cos(\theta) = " + f"{forces['Rolling']:.2f} N")
-    st.latex(r"F_{slope} = mg \sin(\theta) = " + f"{forces['Gravity']:.2f} N")
-    st.write(f"Total Mechanical Power Required: {phys_data['power_mech'] / (assist_lvl*0.2) if assist_lvl > 0 else 0:.1f} W")
-    st.write(f"Motor Output (Assist Lvl {assist_lvl}): {phys_data['power_mech']:.1f} W")
-    st.write(f"Electrical Draw (85% eff): {phys_data['power_elec']:.1f} W")
-    
+with col_data:
+    st.subheader("Vstupní data")
+    st.write(f"Hmotnost: **{celkova_hmotnost} kg**")
+    st.write(f"Rychlost: **{prumerna_rychlost} km/h**")
+    st.write(f"Kapacita aku: **{kapacita_baterie} Wh**")
+    st.write(f"Výkon motoru: **{vykon_motoru} W**")
+    st.write(f"Asistence: **{procento_asistence*100:.0f} %**")
+    st.success(f"Solární energie: **{dodana_energie_wh:.0f} Wh**")
