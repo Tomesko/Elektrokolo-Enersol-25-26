@@ -1,0 +1,130 @@
+import streamlit as st
+import pandas as pd
+import math
+
+# --- KONSTANTY (Fyzika) ---
+CDA = 0.45            # Aerodynamika
+CRR = 0.008           # Valivý odpor
+RHO = 1.225           # Hustota vzduchu
+G = 9.81              # Gravitace
+EFF_MOTOR = 0.85      # Účinnost motoru
+EFF_PANEL = 0.70      # Účinnost panelu
+
+st.set_page_config(page_title="Solar Bike Thesis", layout="wide")
+
+# --- DATA: 5 ÚROVNÍ ASISTENCE ---
+REZIMY_ASISTENCE = {
+    "Vypnuto (0%)": 0.0,
+    "Úroveň 1 - Eco (50%)": 0.5,
+    "Úroveň 2 - Tour (100%)": 1.0,
+    "Úroveň 3 - Sport (150%)": 1.5,
+    "Úroveň 4 - Turbo (200%)": 2.0,
+    "Úroveň 5 - Boost (300%)": 3.0
+}
+
+# --- DATA LOKALIT ---
+LOKALITA_DATA = {
+    "Hostouň (Rovina)":      {"sklon": 0.5, "osvit": 3.8},
+    "Praha (Mírné kopce)":   {"sklon": 1.5, "osvit": 3.5},
+    "Brno (Zvlněné)":        {"sklon": 2.5, "osvit": 3.6},
+    "Šumava (Hory)":         {"sklon": 5.0, "osvit": 3.0},
+    "Vlastní nastavení":     {"sklon": 0.0, "osvit": 0.0}
+}
+
+# --- SIDEBAR ---
+st.sidebar.header("⚙️ 1) Parametry jízdy")
+hmotnost = st.sidebar.number_input("Celková hmotnost (kg)", value=100)
+rychlost_kmh = st.sidebar.number_input("Prům. rychlost (km/h)", value=25)
+
+# KALIBRACE MODELU
+st.sidebar.markdown("---")
+st.sidebar.caption("🔧 Kalibrace reálného dojezdu")
+# UPRAVENO: Koeficient 1.8 zajistí 100 km dojezd pro 500Wh baterii na Eco
+koeficient_realnosti = st.sidebar.slider("Koeficient náročnosti", 1.0, 3.0, 1.8, 0.1)
+
+st.sidebar.header("🔋 2) Baterie a Motor")
+napeti_v = st.sidebar.number_input("Napětí baterie [V]", value=36)
+
+# UPRAVENO: Kapacita nastavena na 500 Wh
+kapacita_wh = st.sidebar.number_input("Kapacita baterie [Wh]", value=500)
+
+# Výběr z 5 úrovní (default Eco)
+nazev_rezimu = st.sidebar.selectbox("Režim asistence", list(REZIMY_ASISTENCE.keys()), index=1)
+support_ratio = REZIMY_ASISTENCE[nazev_rezimu]
+
+vykon_motoru_nom = st.sidebar.number_input("Nominální výkon motoru [W]", value=250)
+
+st.sidebar.header("☀️ 3) Solár a Lokalita")
+vykon_panelu_wp = st.sidebar.number_input("Nominální výkon solar. panelu [Wp]", value=100)
+lokalita = st.sidebar.selectbox("Lokalita", list(LOKALITA_DATA.keys()))
+
+if lokalita == "Vlastní nastavení":
+    sklon_proc = st.sidebar.slider("Terén - Sklon [%]", -5.0, 15.0, 0.0)
+    dodana_energie_wh = st.sidebar.number_input("Dodaná energie z osvitu [Wh]", value=150)
+else:
+    data = LOKALITA_DATA[lokalita]
+    sklon_proc = data["sklon"]
+    osvit_regionu = data["osvit"]
+    dodana_energie_wh = vykon_panelu_wp * osvit_regionu * EFF_PANEL
+    st.sidebar.info(f"📍 {lokalita}: Sklon {sklon_proc}%")
+
+# --- VÝPOČTY ---
+v_ms = rychlost_kmh / 3.6
+
+# 1. Fyzikální odpory
+F_air = 0.5 * RHO * (v_ms**2) * CDA
+F_roll = hmotnost * G * CRR
+F_slope = hmotnost * G * math.sin(math.atan(sklon_proc/100))
+F_total = F_air + F_roll + F_slope
+if F_total < 0: F_total = 0
+
+# 2. Mechanický výkon (s kalibrací)
+P_mech_total = F_total * v_ms
+P_mech_real = P_mech_total * koeficient_realnosti
+
+# 3. Rozdělení síly
+if P_mech_real > 0:
+    P_human = P_mech_real / (1 + support_ratio)
+    P_motor_req = P_mech_real - P_human
+else:
+    P_human = 0
+    P_motor_req = 0
+
+# Elektrický příkon
+P_motor_final = min(P_motor_req, vykon_motoru_nom)
+P_elec_battery = P_motor_final / EFF_MOTOR
+
+# Pokud motor nestíhá
+if P_motor_req > vykon_motoru_nom:
+    P_human = P_mech_real - P_motor_final
+
+# 4. Dojezd
+spotreba_wh_km = P_elec_battery / rychlost_kmh if rychlost_kmh > 0 else 0
+dojezd_bat = kapacita_wh / spotreba_wh_km if spotreba_wh_km > 0 else 0
+dojezd_solar = (kapacita_wh + dodana_energie_wh) / spotreba_wh_km if spotreba_wh_km > 0 else 0
+bonus_km = dojezd_solar - dojezd_bat
+
+# --- DASHBOARD ---
+st.title("🔋 Solar Bike Thesis: Kalibrace")
+st.markdown(f"**Nastavení:** {nazev_rezimu} | **Baterie:** {kapacita_wh} Wh")
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Spotřeba energie", f"{spotreba_wh_km:.1f} Wh/km")
+m2.metric("Dojezd (Jen Baterie)", f"{dojezd_bat:.1f} km")
+m3.metric("Dojezd (+ Solár)", f"{dojezd_solar:.1f} km", delta=f"+{bonus_km:.1f} km")
+
+st.divider()
+
+c_graf, c_info = st.columns([2, 1])
+
+with c_graf:
+    st.subheader("Simulace dojezdu")
+    df = pd.DataFrame({'Zdroj': ['Jen Baterie', 'Baterie + Solár'], 'Dojezd (km)': [dojezd_bat, dojezd_solar]})
+    st.bar_chart(df.set_index('Zdroj'))
+
+with c_info:
+    st.subheader("Výkonová bilance")
+    st.write(f"🚴 **Jezdec:** {P_human:.0f} W")
+    st.write(f"⚡ **Motor:** {P_motor_final:.0f} W")
+    st.caption(f"Základní fyzika: {P_mech_total:.0f} W")
+    st.caption(f"Kalibrovaná zátěž: {P_mech_real:.0f} W")
