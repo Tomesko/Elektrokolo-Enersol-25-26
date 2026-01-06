@@ -3,23 +3,28 @@ import pandas as pd
 import math
 
 # --- KONSTANTY (Fyzika) ---
-CDA = 0.45            # Aerodynamický koeficient (odpor tvaru jezdce a kola)
-CRR = 0.008           # Koeficient valivého odporu (tření pneumatik o asfalt)
-RHO = 1.225           # Hustota vzduchu (kg/m3)
-G = 9.81              # Gravitační zrychlení (m/s2)
-EFF_MOTOR = 0.85      # Účinnost elektromotoru (ztráty teplem v motoru a řadiči)
-EFF_PANEL = 0.70      # Reálná účinnost panelu (ztráty úhlem, teplotou, regulátorem)
+CDA = 0.45            # Aerodynamický koeficient
+CRR = 0.008           # Valivý odpor
+RHO = 1.225           # Hustota vzduchu
+G = 9.81              # Gravitace
+EFF_MOTOR = 0.85      # Účinnost motoru
+EFF_PANEL = 0.70      # Účinnost panelu
 
 st.set_page_config(page_title="Solar Bike Thesis", layout="wide")
 
-# --- DATA: 5 ÚROVNÍ ASISTENCE ---
+# ==============================================================================
+# --- ZMĚNA ZDE: NOVÉ ÚROVNĚ ASISTENCE (0% až 100%) ---
+# ==============================================================================
+# Hodnota 1.0 znamená 100% dopomoc (Motor dává to samé, co člověk = 1:1)
+# Hodnota 0.0 znamená 0% dopomoc (Motor nedává nic)
+
 REZIMY_ASISTENCE = {
-    "Vypnuto (0%)": 0.0,
-    "Úroveň 1 - Eco (50%)": 0.5,
-    "Úroveň 2 - Tour (100%)": 1.0,
-    "Úroveň 3 - Sport (150%)": 1.5,
-    "Úroveň 4 - Turbo (200%)": 2.0,
-    "Úroveň 5 - Boost (300%)": 3.0
+    "Vypnuto": 0.0,
+    "Úroveň 1 (0%)": 0.0,      # Motor je "Ready", ale nepřidává sílu
+    "Úroveň 2 (25%)": 0.25,    # Motor přidává čtvrtinu tvé síly
+    "Úroveň 3 (50%)": 0.50,    # Motor přidává polovinu tvé síly
+    "Úroveň 4 (75%)": 0.75,    # Motor přidává tři čtvrtiny tvé síly
+    "Úroveň 5 - Boost (100%)": 1.0 # Motor dorovnává tvou sílu (1:1)
 }
 
 # --- DATA LOKALIT ---
@@ -38,14 +43,15 @@ rychlost_kmh = st.sidebar.number_input("Prům. rychlost (km/h)", value=25)
 
 st.sidebar.markdown("---")
 st.sidebar.caption("🔧 Kalibrace reálného dojezdu")
-# Koeficient 1.8 zahrnuje rozjezdy, brzdění a boční vítr (z praxe)
+# Koeficient 1.8 pro kompenzaci reálných ztrát
 koeficient_realnosti = st.sidebar.slider("Koeficient náročnosti", 1.0, 3.0, 1.8, 0.1)
 
 st.sidebar.header("🔋 2) Baterie a Motor")
 napeti_v = st.sidebar.number_input("Napětí baterie [V]", value=36)
 kapacita_wh = st.sidebar.number_input("Kapacita baterie [Wh]", value=500)
 
-nazev_rezimu = st.sidebar.selectbox("Režim asistence", list(REZIMY_ASISTENCE.keys()), index=1)
+# Výběr režimu (z nové tabulky výše)
+nazev_rezimu = st.sidebar.selectbox("Režim asistence", list(REZIMY_ASISTENCE.keys()), index=3) # Default na 50%
 support_ratio = REZIMY_ASISTENCE[nazev_rezimu]
 
 vykon_motoru_nom = st.sidebar.number_input("Nominální výkon motoru [W]", value=250)
@@ -66,87 +72,53 @@ else:
 
 
 # ==============================================================================
-# --- VÝPOČTY (DETAILNÍ ROZBOR) ---
+# --- VÝPOČTY ---
 # ==============================================================================
 
-# Převod rychlosti z km/h na m/s (fyzikální vzorce pracují s metry za sekundu)
 v_ms = rychlost_kmh / 3.6
 
-# --- 1. VÝPOČET ODPOROVÝCH SIL (Newtony) ---
-# F_air: Odpor vzduchu. Roste s druhou mocninou rychlosti (proto je rychlá jízda tak náročná).
-# Vzorec: 0.5 * hustota_vzduchu * rychlost^2 * aerodynamický_koeficient
+# 1. Odpory
 F_air = 0.5 * RHO * (v_ms**2) * CDA
-
-# F_roll: Valivý odpor. Tření pneumatik o silnici. Závisí na váze a typu pneu (CRR).
-# Vzorec: hmotnost * gravitace * koeficient_valení
 F_roll = hmotnost * G * CRR
-
-# F_slope: Odpor stoupání (Gravitační složka). Síla, která tě táhne zpátky dolů z kopce.
-# Vzorec: hmotnost * gravitace * sinus úhlu stoupání
 F_slope = hmotnost * G * math.sin(math.atan(sklon_proc/100))
-
-# F_total: Celková síla, kterou musíš překonat, aby se kolo hýbalo dopředu.
 F_total = F_air + F_roll + F_slope
-if F_total < 0: F_total = 0  # Pokud jedeme z kopce a síla je záporná, nastavíme 0 (brzdíme)
+if F_total < 0: F_total = 0
 
-# --- 2. VÝPOČET MECHANICKÉHO VÝKONU (Watty) ---
-# P_mech_total: Teoretický výkon potřebný k udržení rychlosti v laboratorních podmínkách.
-# Vzorec: Síla (N) * Rychlost (m/s)
+# 2. Mechanický výkon (včetně kalibrace)
 P_mech_total = F_total * v_ms
-
-# P_mech_real: Reálný výkon. Zde aplikujeme tvůj "Koeficient náročnosti" (1.8).
-# Zohledňuje, že v reálu neustále brzdíš, rozjíždíš se, fouká vítr a silnice není hladká.
 P_mech_real = P_mech_total * koeficient_realnosti
 
-# --- 3. ROZDĚLENÍ PRÁCE (MOTOR vs. ČLOVĚK) ---
-# Zde se rozhoduje, kdo tu dřinu (P_mech_real) oddře.
-
+# 3. Rozdělení práce (Motor vs Člověk)
 if P_mech_real > 0:
-    # support_ratio: Číslo z nastavení asistence (např. 0.5 pro Eco, 3.0 pro Boost).
-    # Vzorec vychází z logiky: Výkon_celkem = Výkon_lidi + (Výkon_lidi * asistence)
-    P_human = P_mech_real / (1 + support_ratio) # Kolik musíš šlapat ty
-    P_motor_req = P_mech_real - P_human         # Zbytek, který chceme po motoru
+    # Vzorec: P_human + (P_human * support_ratio) = P_total
+    # Pokud je support_ratio 0 (Level 1), pak P_human = P_total (vše šlapeš ty)
+    # Pokud je support_ratio 1 (Level 5), pak P_human = P_total / 2 (půl napůl)
+    P_human = P_mech_real / (1 + support_ratio)
+    P_motor_req = P_mech_real - P_human
 else:
     P_human = 0
     P_motor_req = 0
 
-# --- 4. ELEKTRICKÁ SPOTŘEBA (BATERIE) ---
-# P_motor_final: Oříznutí požadavku. Motor nemůže dát víc než svůj nominální výkon (např. 250 W).
-# Funkce min() vybere menší z čísel: buď to co potřebujeme, nebo maximálku motoru.
+# 4. Elektrická spotřeba
 P_motor_final = min(P_motor_req, vykon_motoru_nom)
-
-# P_elec_battery: Kolik Wattů reálně teče z baterky.
-# Musíme vydělit účinností (0.85), protože motor hřeje. 
-# Aby dal 250W mechanicky, vezme si cca 294W elektricky.
 P_elec_battery = P_motor_final / EFF_MOTOR
 
-# Korekce pro člověka: Pokud motor narazil na limit (nestíhá do kopce),
-# musíš ten chybějící výkon došlapat ty nohama navíc.
+# Korekce pro člověka (pokud motor nestačí)
 if P_motor_req > vykon_motoru_nom:
     P_human = P_mech_real - P_motor_final
 
-# --- 5. VÝPOČET DOJEZDU (Kilometry) ---
-# spotreba_wh_km: Kolik energie "sežere" ujetí 1 kilometru.
-# Vzorec: Výkon (W) / Rychlost (km/h)
+# 5. Dojezdy
 spotreba_wh_km = P_elec_battery / rychlost_kmh if rychlost_kmh > 0 else 0
-
-# dojezd_bat: Kolik km ujedeš jen na baterii.
-# Vzorec: Kapacita baterie (Wh) / Spotřeba na km (Wh/km)
 dojezd_bat = kapacita_wh / spotreba_wh_km if spotreba_wh_km > 0 else 0
-
-# dojezd_solar: Kolik km ujedeš, když k baterii přičteme energii ze slunce.
 dojezd_solar = (kapacita_wh + dodana_energie_wh) / spotreba_wh_km if spotreba_wh_km > 0 else 0
-
-# Bonusové kilometry díky panelu
 bonus_km = dojezd_solar - dojezd_bat
 
 # ==============================================================================
-# --- KONEC VÝPOČTŮ ---
+# --- DASHBOARD ---
 # ==============================================================================
 
-# --- DASHBOARD (ZOBRAZENÍ) ---
 st.title("🔋 Solar Bike Thesis: Kalibrace")
-st.markdown(f"**Nastavení:** {nazev_rezimu} | **Baterie:** {kapacita_wh} Wh")
+st.markdown(f"**Nastavení:** {nazev_rezimu} | **Poměr pomoci:** {support_ratio*100:.0f} %")
 
 m1, m2, m3 = st.columns(3)
 m1.metric("Spotřeba energie", f"{spotreba_wh_km:.1f} Wh/km")
@@ -164,9 +136,11 @@ with c_graf:
 
 with c_info:
     st.subheader("Výkonová bilance")
-    st.write(f"🚴 **Jezdec (Nohy):** {P_human:.0f} W")
-    st.write(f"⚡ **Motor (Hřídel):** {P_motor_final:.0f} W")
-    st.write(f"🔋 **Odběr z baterie:** {P_elec_battery:.0f} W")
+    st.write(f"🚴 **Jezdec:** {P_human:.0f} W")
+    st.write(f"⚡ **Motor:** {P_motor_final:.0f} W")
+    st.write(f"🔋 **Odběr:** {P_elec_battery:.0f} W")
+    
     st.markdown("---")
-    st.caption(f"Fyzikální základ: {P_mech_total:.0f} W")
-    st.caption(f"Po kalibraci (1.8x): {P_mech_real:.0f} W")
+    st.caption("Legenda asistence:")
+    st.caption("0% = Všechno šlapeš ty")
+    st.caption("100% = Motor dává stejně jako ty")
